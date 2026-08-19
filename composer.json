@@ -1,0 +1,41 @@
+{
+    "name": "rsgrinko/laravel-mailerservice-sdk",
+    "description": "SDK сервиса отправки почты для Laravel: клиент API и почтовый транспорт",
+    "type": "library",
+    "license": "MIT",
+    "keywords": ["laravel", "mail", "mailer", "smtp", "queue", "mailerservice"],
+    "authors": [
+        {
+            "name": "Роман Гринько",
+            "email": "rsgrinko@gmail.com"
+        }
+    ],
+    "require": {
+        "php": "^8.3",
+        "illuminate/support": "^13.0",
+        "illuminate/http": "^13.0",
+        "illuminate/mail": "^13.0",
+        "symfony/mailer": "^7.0",
+        "symfony/mime": "^7.0"
+    },
+    "autoload": {
+        "psr-4": {
+            "Rsgrinko\\MailService\\": "src/"
+        }
+    },
+    "extra": {
+        "laravel": {
+            "providers": [
+                "Rsgrinko\\MailService\\MailServiceProvider"
+            ],
+            "aliases": {
+                "MailService": "Rsgrinko\\MailService\\Facades\\MailService"
+            }
+        }
+    },
+    "config": {
+        "sort-packages": true
+    },
+    "minimum-stability": "stable",
+    "prefer-stable": true
+}
