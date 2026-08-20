@@ -46,7 +46,7 @@ class TestCommand extends Command
         $ok = $this->viaApi($client, $email);
 
         if (!$this->option('api')) {
-            $ok = $this->viaTransport($email) && $ok;
+            $ok = $this->viaTransport($client, $email) && $ok;
         }
 
         $this->recent($client);
@@ -67,6 +67,7 @@ class TestCommand extends Command
         $this->table([], [
             ['Адрес сервиса', $url !== '' ? $url : '<error>не задан</error>'],
             ['Ключ', $key !== '' ? substr($key, 0, 8) . '…' : '<error>не задан</error>'],
+            ['Отправитель', $this->sender()],
             ['Метка писем', ((string) ($config['tag'] ?? '')) ?: '—'],
             ['Транспорт сервиса', ((string) ($config['transport'] ?? '')) ?: 'по умолчанию у проекта'],
             ['Ждать отправки (sync)', ($config['sync'] ?? false) ? 'да' : 'нет'],
@@ -152,7 +153,7 @@ class TestCommand extends Command
     /**
      * Тот же путь, каким ходит вся почта приложения: Laravel Mail -> транспорт -> API.
      */
-    private function viaTransport(string $email): bool
+    private function viaTransport(Client $client, string $email): bool
     {
         $name = (string) $this->option('mailer');
         $from = $this->from();
@@ -161,7 +162,7 @@ class TestCommand extends Command
         $this->line('<comment>Через почтовый транспорт Laravel, мейлер ' . $name . '</comment>');
 
         try {
-            Mail::mailer($name)->raw(
+            $sent = Mail::mailer($name)->raw(
                 'Письмо отправлено командой mailerservice:test через почтовый транспорт Laravel.',
                 static function ($message) use ($email, $from): void {
                     $message->to($email)->subject('Проверка транспорта mailerservice');
@@ -186,14 +187,67 @@ class TestCommand extends Command
             return false;
         }
 
-        $this->info('Принято сервисом. Доставкой займётся воркер — результат ниже или в панели.');
+        // Транспорт кладёт в письмо идентификатор, который вернул сервис
+        $id = $sent !== null ? (string) $sent->getMessageId() : '';
+
+        if ($id === '') {
+            $this->info('Принято сервисом. Доставкой займётся воркер — результат в панели.');
+
+            return true;
+        }
+
+        $this->info('Принято сервисом: ' . $id);
+
+        return $this->await($client, $id);
+    }
+
+    /**
+     * Отправка через транспорт отвечает до доставки, поэтому результат ждём отдельно:
+     * иначе отказ SMTP виден только строкой в списке писем.
+     */
+    private function await(Client $client, string $id): bool
+    {
+        $this->line('  Ждём воркер…');
+
+        for ($attempt = 0; $attempt < 15; $attempt++) {
+            try {
+                $message = (array) ($client->status($id)['message'] ?? []);
+            } catch (MailServiceException $e) {
+                $this->error('  Статус не получен: ' . $e->getMessage());
+
+                return false;
+            }
+
+            $status = (string) ($message['status'] ?? '');
+
+            if ($status === 'queued' || $status === 'sending') {
+                sleep(1);
+                continue;
+            }
+
+            if ($status === 'sent') {
+                $this->info('Доставлено, отправитель ' . (string) ($message['from'] ?? '?'));
+
+                return true;
+            }
+
+            $error = (string) ($message['error'] ?? '');
+            $this->error('Не доставлено, статус ' . $status . ': ' . $error);
+
+            if (str_contains($error, 'Sender address rejected')) {
+                $this->senderHint();
+            }
+
+            return false;
+        }
+
+        $this->line('  Письмо всё ещё в очереди: проверьте, что воркер сервиса работает.');
 
         return true;
     }
 
     /**
-     * Последние письма проекта: сюда попадает результат отправки через транспорт,
-     * которая отвечает до фактической доставки.
+     * Последние письма проекта — общая картина: что уходило и с каким исходом.
      */
     private function recent(Client $client): void
     {
@@ -223,11 +277,28 @@ class TestCommand extends Command
     }
 
     /**
-     * Отправитель проверочных писем: свой или из настроек приложения.
+     * Отправитель проверочных писем. По умолчанию тот же, с которым ходит вся почта
+     * приложения: проверять надо ровно его — транспорт сервиса может его и не принять.
      */
     private function from(): string
     {
-        return trim((string) ($this->option('from') ?? ''));
+        $from = trim((string) ($this->option('from') ?? ''));
+
+        return $from !== '' ? $from : trim((string) config('mail.from.address', ''));
+    }
+
+    /**
+     * Чей адрес уйдёт в письме и откуда он взялся.
+     */
+    private function sender(): string
+    {
+        if (trim((string) ($this->option('from') ?? '')) !== '') {
+            return $this->from() . ' (--from)';
+        }
+
+        $from = $this->from();
+
+        return $from !== '' ? $from . ' (MAIL_FROM_ADDRESS)' : 'не задан, подставит транспорт сервиса';
     }
 
     /**
