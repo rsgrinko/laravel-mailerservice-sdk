@@ -2,7 +2,7 @@
 
 declare(strict_types=1);
 
-namespace Rsgrinko\MailService;
+namespace Rsgrinko\MailServiceSdk;
 
 use RuntimeException;
 

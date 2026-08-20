@@ -2,16 +2,13 @@
 
 declare(strict_types=1);
 
-namespace Rsgrinko\MailService;
+namespace Rsgrinko\MailServiceSdk;
 
 use Illuminate\Http\Client\ConnectionException;
 use Illuminate\Http\Client\Factory;
 use Illuminate\Http\Client\PendingRequest;
 use Illuminate\Http\Client\Response;
 use Illuminate\Support\Facades\Http;
-use Throwable;
-
-use function retry;
 
 /**
  * HTTP-клиент API сервиса. Каждый метод — один запрос; ошибки сервиса
@@ -86,9 +83,7 @@ class Client
      */
     public function messages(array $filters = []): array
     {
-        $query = $filters === [] ? '' : '?' . http_build_query($filters);
-
-        return $this->sendJson('GET', '/api/v1/messages' . $query);
+        return $this->sendJson('GET', '/api/v1/messages', $filters);
     }
 
     /**
@@ -133,27 +128,36 @@ class Client
 
     /**
      * Запрос с повторами: если сервис не ответил (обрыв сети), пробуем ещё раз.
-     * Ответ с ошибкой приложения не повторяется.
+     * Ответ с ошибкой приложения не повторяется — повторять 401 или 422 бессмысленно.
+     *
+     * Свой цикл, а не retry() из Http-клиента: тот повторяет и на неуспешный ответ.
      *
      * @param array<string, mixed>|null $payload
      * @return array<string, mixed>
      */
     private function sendJson(string $method, string $path, ?array $payload = null): array
     {
-        try {
-            return retry(
-                $this->retries + 1,
-                fn (): array => $this->execute($method, $path, $payload),
-                $this->retryDelay,
-                static fn (Throwable $e): bool => $e instanceof ConnectionException,
-            );
-        } catch (ConnectionException $e) {
-            throw new MailServiceException('Сервис недоступен: ' . $e->getMessage(), 0, [], [], $e);
+        $attempt = 0;
+
+        while (true) {
+            try {
+                return $this->execute($method, $path, $payload);
+            } catch (ConnectionException $e) {
+                if ($attempt >= $this->retries) {
+                    throw new MailServiceException('Сервис недоступен: ' . $e->getMessage(), 0, [], [], $e);
+                }
+
+                $attempt++;
+
+                if ($this->retryDelay > 0) {
+                    usleep($this->retryDelay * 1000);
+                }
+            }
         }
     }
 
     /**
-     * @param array<string, mixed>|null $payload
+     * @param array<string, mixed>|null $payload для GET — параметры строки запроса
      * @return array<string, mixed>
      */
     private function execute(string $method, string $path, ?array $payload): array
@@ -161,7 +165,7 @@ class Client
         $request = $this->pending();
 
         $response = match ($method) {
-            'GET'    => $request->get($path),
+            'GET'    => $payload === null || $payload === [] ? $request->get($path) : $request->get($path, $payload),
             'POST'   => $payload === null ? $request->post($path) : $request->post($path, $payload),
             'DELETE' => $request->delete($path),
             default  => throw new MailServiceException('Неподдерживаемый метод: ' . $method),
@@ -201,8 +205,13 @@ class Client
         }
 
         $decoded = is_array($decoded) ? $decoded : [];
-        $message = (string) ($decoded['error']['message'] ?? 'Сервис ответил кодом ' . $status);
-        $errors  = (array) ($decoded['error']['details']['errors'] ?? []);
+
+        // 502 при sync — это не ошибка формата: письмо принято, но отправить не вышло,
+        // причина лежит в info, а блока error в таком ответе нет
+        $message = (string) ($decoded['error']['message']
+            ?? $decoded['info']
+            ?? 'Сервис ответил кодом ' . $status);
+        $errors = (array) ($decoded['error']['details']['errors'] ?? []);
 
         throw new MailServiceException($message, $status, $errors, $decoded);
     }

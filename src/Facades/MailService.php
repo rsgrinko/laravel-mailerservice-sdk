@@ -2,11 +2,11 @@
 
 declare(strict_types=1);
 
-namespace Rsgrinko\MailService\Facades;
+namespace Rsgrinko\MailServiceSdk\Facades;
 
 use Illuminate\Support\Facades\Facade;
-use Rsgrinko\MailService\Client;
-use Rsgrinko\MailService\Message;
+use Rsgrinko\MailServiceSdk\Client;
+use Rsgrinko\MailServiceSdk\Message;
 
 /**
  * @method static array send(Message|array $mail)
@@ -18,7 +18,7 @@ use Rsgrinko\MailService\Message;
  * @method static array templates()
  * @method static array health()
  *
- * @see \Rsgrinko\MailService\Client
+ * @see \Rsgrinko\MailServiceSdk\Client
  */
 class MailService extends Facade
 {

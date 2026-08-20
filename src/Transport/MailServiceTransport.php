@@ -2,15 +2,18 @@
 
 declare(strict_types=1);
 
-namespace Rsgrinko\MailService\Transport;
+namespace Rsgrinko\MailServiceSdk\Transport;
 
 use Psr\Log\LoggerInterface;
-use Rsgrinko\MailService\Client;
+use Rsgrinko\MailServiceSdk\Client;
+use Rsgrinko\MailServiceSdk\MailServiceException;
 use Symfony\Component\EventDispatcher\EventDispatcherInterface;
+use Symfony\Component\Mailer\Exception\TransportException;
 use Symfony\Component\Mailer\SentMessage;
 use Symfony\Component\Mailer\Transport\AbstractTransport;
 use Symfony\Component\Mime\Address;
 use Symfony\Component\Mime\Email;
+use Symfony\Component\Mime\Header\UnstructuredHeader;
 use Symfony\Component\Mime\MessageConverter;
 use Symfony\Component\Mime\Part\DataPart;
 
@@ -32,12 +35,19 @@ class MailServiceTransport extends AbstractTransport
         Email::PRIORITY_LOWEST  => 200,
     ];
 
-    /** Заголовки, которые сервис заполнит сам, — их не шлём */
+    /** Заголовки, которые сервис заполнит сам, — их не шлём. Имена в нижнем регистре */
     private const SKIP_HEADERS = [
-        'To', 'Cc', 'Bcc', 'From', 'Reply-To', 'Subject',
-        'Date', 'Message-ID', 'MIME-Version', 'Content-Type',
-        'Content-Transfer-Encoding', 'Content-Disposition', 'Return-Path',
+        'to', 'cc', 'bcc', 'from', 'sender', 'reply-to', 'subject',
+        'date', 'message-id', 'mime-version', 'content-type',
+        'content-transfer-encoding', 'content-disposition', 'content-length',
+        'return-path', 'dkim-signature',
     ];
+
+    /** Метка письма: Mailable::tag() кладёт её в этот заголовок */
+    private const TAG_HEADER = 'x-tag';
+
+    /** Произвольные данные: Mailable::metadata() кладёт их в X-Metadata-<ключ> */
+    private const META_PREFIX = 'x-metadata-';
 
     private Client $client;
     private ?string $tag;
@@ -70,21 +80,28 @@ class MailServiceTransport extends AbstractTransport
 
         $payload = $this->toPayload($original);
 
-        if ($this->tag !== null && $this->tag !== '') {
+        // Метка из настроек запасная: та, что указана у самого письма, важнее
+        if (!isset($payload['tag']) && $this->tag !== null) {
             $payload['tag'] = $this->tag;
         }
 
-        if ($this->transport !== null && $this->transport !== '') {
+        if ($this->transport !== null) {
             $payload['transport'] = $this->transport;
         }
 
-        if ($this->sync) {
-            $this->client->sendNow($payload);
-
-            return;
+        try {
+            $result = $this->sync ? $this->client->sendNow($payload) : $this->client->send($payload);
+        } catch (MailServiceException $e) {
+            // Symfony и Laravel ждут от транспорта именно TransportExceptionInterface:
+            // иначе failover и round-robin не переключатся на следующий транспорт
+            throw new TransportException($e->getMessage(), $e->getCode(), $e);
         }
 
-        $this->client->send($payload);
+        // Идентификатор письма в сервисе: по нему письмо ищется в панели,
+        // приложению он приходит в событии MessageSent
+        if (isset($result['id']) && is_string($result['id'])) {
+            $message->setMessageId($result['id']);
+        }
     }
 
     public function __toString(): string
@@ -137,17 +154,12 @@ class MailServiceTransport extends AbstractTransport
             $payload['attachments'][] = $this->attachment($part);
         }
 
-        $headers = $this->customHeaders($email);
-        if ($headers !== []) {
-            $payload['headers'] = $headers;
-        }
-
         $priority = self::PRIORITY_MAP[$email->getPriority()] ?? 100;
         if ($priority !== 100) {
             $payload['priority'] = $priority;
         }
 
-        return $payload;
+        return array_merge($payload, $this->headers($email));
     }
 
     /**
@@ -166,56 +178,99 @@ class MailServiceTransport extends AbstractTransport
     private function attachment(DataPart $part): array
     {
         $item = [
-            'name'    => $part->getFilename() ?? 'attachment',
-            'content' => base64_encode($part->getBody()),
+            'name'         => $part->getFilename() ?? 'attachment',
+            'content'      => base64_encode($part->getBody()),
+            'content_type' => $part->getContentType(),
         ];
 
-        if ($part->getContentType() !== 'application/octet-stream') {
-            $item['content_type'] = $part->getContentType();
+        if ($part->getDisposition() !== 'inline') {
+            return $item;
         }
 
-        if ($part->getDisposition() === 'inline') {
-            $item['inline'] = true;
-        }
+        $item['inline'] = true;
 
-        if ($part->hasContentId()) {
-            $item['cid'] = $part->getContentId();
-        }
+        // В HTML картинка помечена как cid:<имя>, а на настоящий Content-ID это имя
+        // меняет Symfony при сборке письма. Письмо собирает сервис, поэтому cid берём
+        // тот, на который ссылается HTML: имя части, если Content-ID не задан явно.
+        $item['cid'] = $part->hasContentId()
+            ? $part->getContentId()
+            : ($part->getName() ?? $item['name']);
 
         return $item;
     }
 
     /**
-     * Пользовательские заголовки письма (X-*, кастомные) для передачи в сервис.
+     * Заголовки письма: служебные отбрасываем, метку и метаданные Laravel
+     * (Mailable::tag() и Mailable::metadata()) переносим в поля API.
      *
-     * @return array<string, string>
+     * @return array<string, mixed>
      */
-    private function customHeaders(Email $email): array
+    private function headers(Email $email): array
     {
+        $result  = [];
         $headers = [];
+        $meta    = [];
 
         foreach ($email->getHeaders()->all() as $header) {
-            $name = $header->getName();
+            $name  = $header->getName();
+            $lower = strtolower($name);
 
-            if (in_array($name, self::SKIP_HEADERS, true) || str_starts_with($name, 'X-Symfony')) {
+            if (in_array($lower, self::SKIP_HEADERS, true) || str_starts_with($lower, 'x-symfony')) {
                 continue;
             }
 
-            $value = $header->getBodyAsString();
-            if ($value !== '') {
-                $headers[$name] = $value;
+            // getBodyAsString() отдаёт значение уже закодированным (=?utf-8?Q?…?=),
+            // а кодировать заголовки — дело сервиса, ему нужен исходный текст
+            $value = $header instanceof UnstructuredHeader ? $header->getBody() : $header->getBodyAsString();
+            if ($value === '') {
+                continue;
             }
+
+            if ($lower === self::TAG_HEADER) {
+                $result['tag'] = $value;
+                continue;
+            }
+
+            if (str_starts_with($lower, self::META_PREFIX)) {
+                $meta[substr($name, strlen(self::META_PREFIX))] = $value;
+                continue;
+            }
+
+            $headers[$name] = $value;
         }
 
-        return $headers;
+        if ($headers !== []) {
+            $result['headers'] = $headers;
+        }
+
+        if ($meta !== []) {
+            $result['meta'] = $meta;
+        }
+
+        return $result;
     }
 
+    /**
+     * Тело письма Symfony держит строкой или потоком.
+     */
     private function asString(mixed $body): string
     {
         if ($body === null) {
             return '';
         }
 
-        return is_string($body) ? $body : (string) stream_get_contents($body);
+        if (is_string($body)) {
+            return $body;
+        }
+
+        if (!is_resource($body)) {
+            return '';
+        }
+
+        if (stream_get_meta_data($body)['seekable']) {
+            rewind($body);
+        }
+
+        return (string) stream_get_contents($body);
     }
 }

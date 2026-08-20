@@ -4,7 +4,7 @@
 Работает и как обычный почтовый транспорт (`config/mail.php`), и как прямой
 клиент API — для статусов, шаблонов и отправки по шаблону без Laravel Mail.
 
-Требования: PHP 8.3+, Laravel 13, Symfony Mailer 7 (тянется Laravel'ом).
+Требования: PHP 8.2+, Laravel 11, 12 или 13, Symfony Mailer 6.4+ (тянется Laravel'ом).
 
 ## Установка
 
@@ -60,18 +60,41 @@ Mail::to($user->email)->send(new OrderShipped($order));
 Тема, отправитель, получатели, копии, тела и вложения из Symfony-письма
 раскладываются автоматически; пользовательские заголовки (кроме служебных)
 передаются как есть. Приоритет Symfony (1–5) ложится на приоритет очереди
-сервиса, обычные письма уходят с 100.
+сервиса, обычные письма уходят с 100. Метка и метаданные письма
+(`Mailable::tag()`, `Mailable::metadata()`) ложатся в поля `tag` и `meta` —
+метка у письма важнее той, что задана в настройках.
+
+Картинки внутри HTML (`$message->embed(...)`, `<img src="cid:...">`) уходят
+вложениями с тем же `cid`, на который ссылается разметка, — MIME собирает
+сервис.
 
 Если в настройках стоит `MAILERSERVICE_SYNC=true`, транспорт дожидается
 фактической отправки: медленнее, зато ошибка доставки падает прямо в
-`Mail::send()`.
+`Mail::send()`. Ошибка сервиса приходит как
+`Symfony\Component\Mailer\Exception\TransportException`, поэтому штатный
+`failover` Laravel переключается на запасной мейлер.
+
+Идентификатор письма в сервисе доступен приложению в событии `MessageSent`
+(`$event->sent->getMessageId()`) — по нему письмо ищется в панели.
+
+Настройки можно задать и на отдельный мейлер — так заводятся несколько
+мейлеров с разными метками:
+
+```php
+'billing' => [
+    'transport'         => 'mailerservice',  // драйвер пакета
+    'tag'               => 'billing',
+    'service_transport' => 'yandex',         // транспорт на стороне сервиса
+    'sync'              => false,
+],
+```
 
 ## Прямой клиент API
 
 Клиент лежит в контейнере, наружу — фасад `MailService`:
 
 ```php
-use Rsgrinko\MailService\Message;
+use Rsgrinko\MailServiceSdk\Message;
 
 // письмо по шаблону сервиса
 $result = MailService::send(
@@ -124,10 +147,10 @@ Message::to('user@example.com')
 
 ## Обработка ошибок
 
-Все методы бросают `Rsgrinko\MailService\MailServiceException`:
+Все методы бросают `Rsgrinko\MailServiceSdk\MailServiceException`:
 
 ```php
-use Rsgrinko\MailService\MailServiceException;
+use Rsgrinko\MailServiceSdk\MailServiceException;
 
 try {
     MailService::send(Message::to('user@example.com')->subject('Привет')->text('Тело'));

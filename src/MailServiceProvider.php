@@ -2,13 +2,12 @@
 
 declare(strict_types=1);
 
-namespace Rsgrinko\MailService;
+namespace Rsgrinko\MailServiceSdk;
 
 use Illuminate\Http\Client\Factory;
-use Illuminate\Mail\MailManager;
 use Illuminate\Support\Facades\Mail;
 use Illuminate\Support\ServiceProvider;
-use Rsgrinko\MailService\Transport\MailServiceTransport;
+use Rsgrinko\MailServiceSdk\Transport\MailServiceTransport;
 
 /**
  * Регистрирует клиент API и почтовый транспорт mailerservice.
@@ -46,15 +45,29 @@ class MailServiceProvider extends ServiceProvider
             ], 'mailerservice-config');
         }
 
+        // $config — настройки мейлера из config/mail.php. Метку, транспорт сервиса и
+        // режим отправки там можно переопределить: так заводятся несколько мейлеров
+        // с разными метками. Ключ transport в этом массиве занят именем драйвера,
+        // поэтому транспорт сервиса берётся из service_transport.
         Mail::extend('mailerservice', function (array $config): MailServiceTransport {
             $settings = (array) $this->app['config']->get('mailerservice', []);
 
             return new MailServiceTransport(
                 $this->app->make(Client::class),
-                isset($settings['tag']) && $settings['tag'] !== '' ? (string) $settings['tag'] : null,
-                isset($settings['transport']) && $settings['transport'] !== '' ? (string) $settings['transport'] : null,
-                (bool) ($settings['sync'] ?? false),
+                $this->text($config['tag'] ?? null) ?? $this->text($settings['tag'] ?? null),
+                $this->text($config['service_transport'] ?? null) ?? $this->text($settings['transport'] ?? null),
+                (bool) ($config['sync'] ?? $settings['sync'] ?? false),
             );
         });
+    }
+
+    /**
+     * Пустая строка и null для настройки — одно и то же: «не задано».
+     */
+    private function text(mixed $value): ?string
+    {
+        $value = is_string($value) ? trim($value) : '';
+
+        return $value !== '' ? $value : null;
     }
 }
