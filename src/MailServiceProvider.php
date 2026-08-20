@@ -7,6 +7,7 @@ namespace Rsgrinko\MailServiceSdk;
 use Illuminate\Http\Client\Factory;
 use Illuminate\Support\Facades\Mail;
 use Illuminate\Support\ServiceProvider;
+use Rsgrinko\MailServiceSdk\Console\TestCommand;
 use Rsgrinko\MailServiceSdk\Transport\MailServiceTransport;
 
 /**
@@ -43,6 +44,8 @@ class MailServiceProvider extends ServiceProvider
             $this->publishes([
                 __DIR__ . '/../config/mailerservice.php' => $this->app->configPath('mailerservice.php'),
             ], 'mailerservice-config');
+
+            $this->commands([TestCommand::class]);
         }
 
         // $config — настройки мейлера из config/mail.php. Метку, транспорт сервиса и
