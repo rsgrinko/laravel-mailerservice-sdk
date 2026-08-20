@@ -22,6 +22,7 @@ class TestCommand extends Command
         {email? : кому слать проверочные письма; без адреса — только проверка связи}
         {--from= : отправитель проверочных писем вместо MAIL_FROM_ADDRESS}
         {--mailer=mailerservice : имя мейлера из config/mail.php}
+        {--wait=20 : сколько секунд ждать воркер; 0 — не дожидаться доставки}
         {--api : не трогать Laravel Mail, проверить только API}';
 
     protected $description = 'Проверка сервиса рассылки и отправка тестового письма';
@@ -207,12 +208,28 @@ class TestCommand extends Command
      */
     private function await(Client $client, string $id): bool
     {
-        $this->line('  Ждём воркер…');
+        $limit = (float) $this->option('wait');
 
-        for ($attempt = 0; $attempt < 15; $attempt++) {
+        if ($limit <= 0) {
+            $this->line('  Доставку не ждём: смотрите письмо в панели.');
+
+            return true;
+        }
+
+        $started  = microtime(true);
+        $deadline = $started + $limit;
+
+        // Письмо обычно уходит за пару секунд, поэтому сначала спрашиваем часто,
+        // а дальше реже — чтобы не долбить сервис, если воркер стоит
+        $pause = 250_000;
+
+        $this->output->write('  Ждём воркер');
+
+        while (true) {
             try {
                 $message = (array) ($client->status($id)['message'] ?? []);
             } catch (MailServiceException $e) {
+                $this->output->writeln('');
                 $this->error('  Статус не получен: ' . $e->getMessage());
 
                 return false;
@@ -220,30 +237,49 @@ class TestCommand extends Command
 
             $status = (string) ($message['status'] ?? '');
 
-            if ($status === 'queued' || $status === 'sending') {
-                sleep(1);
-                continue;
+            if ($status !== 'queued' && $status !== 'sending') {
+                $this->output->writeln('');
+
+                return $this->report($message, $status, microtime(true) - $started);
             }
 
-            if ($status === 'sent') {
-                $this->info('Доставлено, отправитель ' . (string) ($message['from'] ?? '?'));
+            if (microtime(true) + ($pause / 1_000_000) >= $deadline) {
+                $this->output->writeln('');
+                $this->line('  Письмо всё ещё в очереди. Проверьте, работает ли воркер сервиса —');
+                $this->line('  на обзоре панели видно, когда он отзывался в последний раз.');
 
                 return true;
             }
 
-            $error = (string) ($message['error'] ?? '');
-            $this->error('Не доставлено, статус ' . $status . ': ' . $error);
+            $this->output->write('.');
+            usleep($pause);
+            $pause = min($pause * 2, 1_000_000);
+        }
+    }
 
-            if (str_contains($error, 'Sender address rejected')) {
-                $this->senderHint();
-            }
+    /**
+     * Чем закончилась доставка.
+     *
+     * @param array<string, mixed> $message
+     */
+    private function report(array $message, string $status, float $seconds): bool
+    {
+        $sender = (string) ($message['sender'] ?? '') ?: (string) ($message['from'] ?? '?');
 
-            return false;
+        if ($status === 'sent') {
+            $this->info(sprintf('Доставлено за %.1f с, отправитель %s', $seconds, $sender));
+
+            return true;
         }
 
-        $this->line('  Письмо всё ещё в очереди: проверьте, что воркер сервиса работает.');
+        $error = (string) ($message['error'] ?? '');
+        $this->error('Не доставлено, статус ' . $status . ': ' . $error);
 
-        return true;
+        if (str_contains($error, 'Sender address rejected')) {
+            $this->senderHint();
+        }
+
+        return false;
     }
 
     /**
