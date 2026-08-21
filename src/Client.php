@@ -117,6 +117,47 @@ class Client
     }
 
     /**
+     * Стоп-лист: адреса, которым сервис больше не пишет. Письмо такому адресу
+     * отсеивается на приёме, а если закрыты все получатели — письмо получает
+     * статус suppressed и никуда не уходит.
+     *
+     * @param array<string, string|int> $filters reason, search, page, per_page
+     * @return array<string, mixed>
+     */
+    public function suppressions(array $filters = []): array
+    {
+        return $this->sendJson('GET', '/api/v1/suppressions', $filters);
+    }
+
+    /**
+     * Закрыть адрес: писать ему больше не будем.
+     *
+     * @param string $reason bounce, complaint, unsubscribe или manual
+     * @return array<string, mixed>
+     */
+    public function suppress(string $email, string $reason = 'manual', string $note = ''): array
+    {
+        $payload = ['email' => $email, 'reason' => $reason];
+
+        if ($note !== '') {
+            $payload['note'] = $note;
+        }
+
+        return $this->sendJson('POST', '/api/v1/suppressions', $payload);
+    }
+
+    /**
+     * Открыть адрес обратно. Адрес, закрытый для всех проектов сразу (так ложатся
+     * отказы почтовых серверов), через API не снять — только в панели.
+     *
+     * @return array<string, mixed>
+     */
+    public function unsuppress(string $email): array
+    {
+        return $this->sendJson('DELETE', '/api/v1/suppressions/' . rawurlencode($email));
+    }
+
+    /**
      * Состояние сервиса.
      *
      * @return array<string, mixed>

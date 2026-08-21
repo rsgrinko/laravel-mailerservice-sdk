@@ -16,6 +16,9 @@ use Rsgrinko\MailServiceSdk\Message;
  * @method static array retry(string $id)
  * @method static array cancel(string $id)
  * @method static array templates()
+ * @method static array suppressions(array $filters = [])
+ * @method static array suppress(string $email, string $reason = 'manual', string $note = '')
+ * @method static array unsuppress(string $email)
  * @method static array health()
  *
  * @see \Rsgrinko\MailServiceSdk\Client

@@ -155,6 +155,11 @@ MailService::retry($result['id']);
 MailService::cancel($result['id']);
 MailService::templates();
 MailService::health();
+
+// стоп-лист проекта
+MailService::suppress('ivan@example.com', 'complaint', 'пожаловался на спам');
+MailService::suppressions(['reason' => 'bounce']);
+MailService::unsuppress('ivan@example.com');
 ```
 
 Методы клиента:
@@ -168,7 +173,13 @@ MailService::health();
 | `retry($id)` | вернуть письмо в очередь |
 | `cancel($id)` | отменить письмо |
 | `templates()` | список шаблонов |
+| `suppressions($filters)` | стоп-лист: кому проект больше не пишет |
+| `suppress($email, $reason, $note)` | закрыть адрес |
+| `unsuppress($email)` | открыть адрес обратно |
 | `health()` | состояние сервиса |
+
+Шаблоны и транспорты у ключа свои: видно то, что принадлежит владельцу проекта,
+плюс общие транспорты. Чужого имени для проекта не существует.
 
 Письмо `Message` собирается цепочкой (без Laravel Mail, напрямую в API):
 
