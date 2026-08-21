@@ -146,7 +146,18 @@ class TestCommand extends Command
             return false;
         }
 
-        $this->info('Отправлено: ' . (string) ($result['id'] ?? '?') . ', статус ' . (string) ($result['status'] ?? '?'));
+        $status = (string) ($result['status'] ?? '?');
+        $id     = (string) ($result['id'] ?? '?');
+
+        // Сервис принял письмо и сам решил не отправлять: адрес закрыт стоп-листом
+        if ($status === 'suppressed') {
+            $this->error('Не отправлено: ' . $id . ' — адрес в стоп-листе сервиса.');
+            $this->suppressedHint($email);
+
+            return false;
+        }
+
+        $this->info('Отправлено: ' . $id . ', статус ' . $status);
 
         return true;
     }
@@ -199,14 +210,14 @@ class TestCommand extends Command
 
         $this->info('Принято сервисом: ' . $id);
 
-        return $this->await($client, $id);
+        return $this->await($client, $id, $email);
     }
 
     /**
      * Отправка через транспорт отвечает до доставки, поэтому результат ждём отдельно:
      * иначе отказ SMTP виден только строкой в списке писем.
      */
-    private function await(Client $client, string $id): bool
+    private function await(Client $client, string $id, string $email): bool
     {
         $limit = (float) $this->option('wait');
 
@@ -240,7 +251,7 @@ class TestCommand extends Command
             if ($status !== 'queued' && $status !== 'sending') {
                 $this->output->writeln('');
 
-                return $this->report($message, $status, microtime(true) - $started);
+                return $this->report($message, $status, microtime(true) - $started, $email);
             }
 
             if (microtime(true) + ($pause / 1_000_000) >= $deadline) {
@@ -262,7 +273,7 @@ class TestCommand extends Command
      *
      * @param array<string, mixed> $message
      */
-    private function report(array $message, string $status, float $seconds): bool
+    private function report(array $message, string $status, float $seconds, string $email): bool
     {
         $sender = (string) ($message['sender'] ?? '') ?: (string) ($message['from'] ?? '?');
 
@@ -272,8 +283,17 @@ class TestCommand extends Command
             return true;
         }
 
+        if ($status === 'suppressed') {
+            // Адрес берём из аргумента команды, а не из письма: закрытых получателей
+            // сервис из него вычёркивает, и список to у такого письма пуст
+            $this->error('Не отправлено: адрес в стоп-листе сервиса — письма ему не уходят.');
+            $this->suppressedHint($email);
+
+            return false;
+        }
+
         $error = (string) ($message['error'] ?? '');
-        $this->error('Не доставлено, статус ' . $status . ': ' . $error);
+        $this->error('Не доставлено, статус ' . $status . ($error === '' ? '' : ': ' . $error));
 
         if (str_contains($error, 'Sender address rejected')) {
             $this->senderHint();
@@ -365,6 +385,17 @@ class TestCommand extends Command
         if ($code === 429) {
             $this->line('  Упёрлись в лимит проекта — лимиты видны в панели сервиса.');
         }
+    }
+
+    /**
+     * Адрес закрыт стоп-листом: письмо принято, но отправлять его сервис не будет.
+     * Это не поломка — так и задумано, поэтому подсказка про то, как открыть адрес.
+     */
+    private function suppressedHint(string $email = ''): void
+    {
+        $this->line('  Сервис принял письмо и сохранил его со статусом suppressed — отправки не было.');
+        $this->line('  Кто закрыт и почему: MailService::suppressions() или раздел «Стоп-лист» в панели.');
+        $this->line('  Открыть обратно: MailService::unsuppress(' . ($email === '' ? "'адрес'" : "'" . $email . "'") . ').');
     }
 
     private function senderHint(): void
